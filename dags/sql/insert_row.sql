@@ -1,0 +1,1 @@
+INSERT INTO selection_dst_json (json) VALUES ('{{ params.json_data }}');
