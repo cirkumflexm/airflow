@@ -51,7 +51,7 @@ with DAG(
     create_selection_table = PostgresOperator(
         task_id="create_selection_table",
         postgres_conn_id="postgres_dst",
-        sql="sql/dst_postgres_cr_table.sql",
+        sql="sql/dst_postgres_cr_table_selection_json.sql",
     )
 
     postgres_airbyte = PythonOperator(

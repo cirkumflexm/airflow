@@ -1,3 +1,5 @@
+"""
+
 import json
 from datetime import datetime
 from typing import List
@@ -38,7 +40,7 @@ class Selection(BaseModel):
 
 
 with DAG(
-        'airbyte_conveyor_selection',
+        'airbyte_conveyor_selection_json',
         default_args={
             'email': ['mansur.insur@gmail.com'],
             'email_on_failure': False,
@@ -49,21 +51,23 @@ with DAG(
         catchup=False,
         tags=['airbyte'],
 ) as dag:
+
     create_selection_table = PostgresOperator(
         # Создание таблицы для данных после обработки
         task_id="create_table_dst_json",
         postgres_conn_id="postgres_dst",
-        sql="sql/dst_postgres_cr_table_selection.sql",
+        sql="sql/dst_postgres_cr_table_selection_json.sql",
     )
 
 
-    def get_data_bd(select, select_details):
+    def get_data_bd():
         src = PostgresHook(postgres_conn_id='postgres_airbyte')
         src_conn = src.get_conn()
         src_cursor = src_conn.cursor()
-        src_cursor.execute(select)
+        src_cursor.execute("SELECT _airbyte_ab_id, _airbyte_data, _airbyte_emitted_at FROM _airbyte_raw_selection;")
         src_data_raw_selection = src_cursor.fetchall()
-        src_cursor.execute(select_details)
+        src_cursor.execute(
+            "SELECT _airbyte_ab_id, _airbyte_data, _airbyte_emitted_at FROM _airbyte_raw_selection_details;")
         src_data_raw_selection_details = src_cursor.fetchall()
         src_conn.close()
         return src_data_raw_selection, src_data_raw_selection_details
@@ -89,13 +93,12 @@ with DAG(
                 enum_procedure_type="selection"
             )
             data_list.append(selection_data.dict())
+            print(data_list)
         return data_list
 
 
     def conveyor_data_bd():
-        select = "SELECT _airbyte_ab_id, _airbyte_data, _airbyte_emitted_at FROM _airbyte_raw_selection;"
-        select_details = "SELECT _airbyte_ab_id, _airbyte_data, _airbyte_emitted_at FROM _airbyte_raw_selection_details;"
-        selection_list, selection_details_list = get_data_bd(select, select_details)
+        selection_list, selection_details_list = get_data_bd()
         return conveyor(selection_list, selection_details_list)
 
 
@@ -104,45 +107,30 @@ with DAG(
         python_callable=conveyor_data_bd,
     )
 
-
-    def get_sql_query_many_dst(src_data: list, first_part: str, pk_new_row) -> str:
+    def get_sql_query_dst(src_data: list) -> str:
+        first_part = 'INSERT INTO selection_dst_json (json) VALUES \n'
         query_data = []
         for row_data in src_data:
-            query_data.append(f"({pk_new_row}, '{row_data['name']}', {row_data['amount']})")
+            query_data.append("('{}')".format(json.dumps(row_data, ensure_ascii=False)))
         query_data_str = ",\n".join(query_data)
         sql_query_dst = '{} {};'.format(first_part, query_data_str)
         return sql_query_dst
 
-
-    def get_sql_query_one_dst(row_data: dict, first_part: str) -> str:
-        query_data = (f"({row_data['id']}, '{row_data['name']}', '{row_data['start_date']}', "
-                      f"'{row_data['end_date']}', '{row_data['url']}', '{row_data['address']}',"
-                      f" '{row_data['enum_procedure_type']}')")
-        sql_query_dst = '{} {} RETURNING pk;'.format(first_part, query_data)
-        return sql_query_dst
-
-    insert_query = 'INSERT INTO selection_dst (id, name, start_date, end_date, url, address, enum_procedure_type) VALUES \n'
-    insert_slot_query = 'INSERT INTO selection_dst_lots (selection_pk, name, amount) VALUES \n'
-
-    def postgres_dst_selection(ti=None):
+    def postgres_dst(ti=None):
+        src_data = ti.xcom_pull(task_ids='conveyor_op')
         dst = PostgresHook(postgres_conn_id='postgres_dst')
         dst_conn = dst.get_conn()
         dst_cursor = dst_conn.cursor()
-        src_data = ti.xcom_pull(task_ids='conveyor_op')
-        for row_data in src_data:
-            query_dst = get_sql_query_one_dst(row_data, insert_query)
-            dst_cursor.execute(query_dst)
-            pk_new_row = dst_cursor.fetchone()[0]
-            if row_data['lots']:
-                query_slot_dst = get_sql_query_many_dst(row_data['lots'], insert_slot_query, pk_new_row)
-            dst_cursor.execute(query_slot_dst)
+        query_dst = get_sql_query_dst(src_data)
+        dst_cursor.execute(query_dst)
         dst_conn.commit()
         dst_conn.close()
 
 
     postgres_airbyte = PythonOperator(
         task_id='postgres_airbyte',
-        python_callable=postgres_dst_selection,
+        python_callable=postgres_dst,
     )
 
     create_selection_table >> conveyor_op >> postgres_airbyte
+"""

@@ -1,3 +1,5 @@
 .idea/
 logs/
 venv/
+__pycache__/
+dags/__pycache__/
