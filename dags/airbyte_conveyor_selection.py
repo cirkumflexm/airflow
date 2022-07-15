@@ -1,4 +1,3 @@
-import json
 from datetime import datetime
 from typing import List
 
@@ -51,11 +50,14 @@ with DAG(
 ) as dag:
     create_selection_table = PostgresOperator(
         # Создание таблицы для данных после обработки
-        task_id="create_table_dst_json",
+        task_id="create_selection_table",
         postgres_conn_id="postgres_dst",
         sql="sql/dst_postgres_cr_table_selection.sql",
     )
 
+    enum_procedure_type = 'selection'
+    table_name_src = 'selection'
+    table_dst = 'selection_dst'
 
     def get_data_bd(select, select_details):
         src = PostgresHook(postgres_conn_id='postgres_airbyte')
@@ -86,15 +88,15 @@ with DAG(
                 **data,
                 address=selection_details_data.get("delivery_address"),
                 lots=lots,
-                enum_procedure_type="selection"
+                enum_procedure_type=enum_procedure_type
             )
             data_list.append(selection_data.dict())
         return data_list
 
 
     def conveyor_data_bd():
-        select = "SELECT _airbyte_ab_id, _airbyte_data, _airbyte_emitted_at FROM _airbyte_raw_selection;"
-        select_details = "SELECT _airbyte_ab_id, _airbyte_data, _airbyte_emitted_at FROM _airbyte_raw_selection_details;"
+        select = f"SELECT _airbyte_ab_id, _airbyte_data, _airbyte_emitted_at FROM _airbyte_raw_{table_name_src};"
+        select_details = f"SELECT _airbyte_ab_id, _airbyte_data, _airbyte_emitted_at FROM _airbyte_raw_{table_name_src}_details;"
         selection_list, selection_details_list = get_data_bd(select, select_details)
         return conveyor(selection_list, selection_details_list)
 
@@ -121,8 +123,9 @@ with DAG(
         sql_query_dst = '{} {} RETURNING pk;'.format(first_part, query_data)
         return sql_query_dst
 
-    insert_query = 'INSERT INTO selection_dst (id, name, start_date, end_date, url, address, enum_procedure_type) VALUES \n'
-    insert_slot_query = 'INSERT INTO selection_dst_lots (selection_pk, name, amount) VALUES \n'
+
+    insert_query = f'INSERT INTO {table_dst} (id, name, start_date, end_date, url, address, enum_procedure_type) VALUES \n'
+    insert_slot_query = f'INSERT INTO {table_dst}_lots (selection_pk, name, amount) VALUES \n'
 
     def postgres_dst_selection(ti=None):
         dst = PostgresHook(postgres_conn_id='postgres_dst')
