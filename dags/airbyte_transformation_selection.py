@@ -1,41 +1,11 @@
 from datetime import datetime
-from typing import List
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.operators.postgres import PostgresOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from psycopg2 import sql
-from pydantic import parse_obj_as, BaseModel, validator
-
-
-class Lot(BaseModel):
-    name: str
-    amount: float
-
-    @validator("name")
-    def check_str(cls, str_value):
-        if "'" in str_value or '"' in str_value:
-            str_value = str_value.replace('"', ' ').replace("'", ' ').strip()
-        return str_value
-
-
-class Selection(BaseModel):
-    id: int
-    name: str
-    start_date: str
-    end_date: str
-    url: str
-    address: str
-    lots: List[Lot]
-    enum_procedure_type: str
-
-    @validator("name", "address")
-    def check_str(cls, str_value):
-        if "'" in str_value or '"' in str_value:
-            str_value = str_value.replace('"', ' ').replace("'", ' ').strip()
-        return str_value
-
+from psycopg2.sql import Composed
 
 with DAG(
         'airbyte_transformation_selection',
@@ -69,6 +39,7 @@ with DAG(
         return select
 
     def make_query(src_cursor, limit_row: int, offset_row: int):
+        """Осуществляет запрос к БД с исходной информацией"""
         query_src_table = create_query_src_table('selection', limit_row, offset_row)
         src_cursor.execute(query_src_table)
         src_data_rows = src_cursor.fetchall()
@@ -76,6 +47,7 @@ with DAG(
         return row_count, src_data_rows
 
     def transformation_one_row(src_cursor) -> dict:
+        """Извлекае одну строку тендера и соответствующий лоты, трансформирует"""
         row_count = 1
         limit_row = 1000
         offset_row = 0
@@ -91,7 +63,8 @@ with DAG(
                                     'enum_procedure_type': src_data_rows_details[2], 'lots': src_data_rows_details[1]}
                 yield transformed_data
 
-    def get_src_data():
+    def get_src_data() -> dict:
+        """Подключаеься к БД исходника и извелекает данные как генератор"""
         src = PostgresHook(postgres_conn_id='postgres_airbyte')
         src_conn = src.get_conn()
         src_cursor = src_conn.cursor()
@@ -100,16 +73,20 @@ with DAG(
             yield one_row
         src_conn.close()
 
-    def get_sql_query_many_dst(src_data: list, pk_new_row) -> str:
-        first_part = f'INSERT INTO selection_dst_lot (selection_pk, name, amount) VALUES \n'
+    def get_sql_query_many_dst(src_data: list, pk_new_row) -> Composed:
+        """Принимает список словорей с данными и формимрует запрос на множественное добовление"""
+        first_part = sql.SQL('INSERT INTO selection_dst_lots (selection_pk, name, amount) VALUES \n')
         query_data = []
         for row_data in src_data:
-            query_data.append(f"({pk_new_row}, '{row_data['name']}', {row_data['amount']})")
-        query_data_str = ",\n".join(query_data)
-        sql_query_dst = '{} {};'.format(first_part, query_data_str)
+            query_data.append(sql.SQL("({}, {}, {})")
+                              .format(sql.Literal(pk_new_row),
+                                      sql.Literal(row_data['name']),
+                                      sql.Literal(row_data['amount'])))
+        sql_query_dst = sql.SQL('{} {};').format(first_part, sql.SQL(",\n").join(query_data))
         return sql_query_dst
 
-    def get_sql_query_one_dst(data: dict):
+    def get_sql_query_one_dst(data: dict) -> Composed:
+        """Принимает словарь данных и формирует запрос на добавление строки"""
         sql_query = sql.SQL('INSERT INTO selection_dst ({}) VALUES ({}) RETURNING pk;')\
             .format(
                     sql.SQL(", ").join(map(sql.Identifier, data)),
@@ -118,6 +95,7 @@ with DAG(
         return sql_query
 
     def write_db_dst(row_data):
+        """Запись данных в бд назначения"""
         dst = PostgresHook(postgres_conn_id='postgres_dst')
         dst_conn = dst.get_conn()
         dst_cursor = dst_conn.cursor()
@@ -127,14 +105,12 @@ with DAG(
         tender_id = dst_cursor.fetchone()[0]
         if lots:
             query_slot_dst = get_sql_query_many_dst(lots, tender_id)
-            #dst_cursor.execute(query_slot_dst)
-
-
+            dst_cursor.execute(query_slot_dst)
         dst_conn.commit()
         dst_conn.close()
 
     def transformation_data():
-        get_src_data()
+        """Берем исходные данные и трансформируем"""
         for src_rows in get_src_data():
             write_db_dst(src_rows)
 
